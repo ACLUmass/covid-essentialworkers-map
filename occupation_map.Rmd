@@ -1,0 +1,381 @@
+---
+title: "Mapping Occupation and Race in Boston During COVID-19"
+author: "Lauren Chambers"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r, results="hide", message=FALSE, warning=FALSE}
+library(tidyverse)
+library(leaflet)
+library(tigris)
+library(tidycensus)
+library(rgdal)
+```
+
+```{r, eval=FALSE}
+# tidycensus: load API key
+# See here for details: https://walkerke.github.io/tidycensus/articles/basic-usage.html
+key <- read_json("../api_key.json")$census_api_key
+census_api_key(key, install=T)
+```
+
+# Boston
+
+## Download census tract geography
+```{r, results="hide"}
+# Download census tract geography for Boston city from Analyze Boston
+boston_tracts <- rgdal::readOGR("http://bostonopendata-boston.opendata.arcgis.com/datasets/4a8eb4fb3be44ed5a1eec28551b9f3b2_0.geojson?outSR={%22latestWkid%22:3857,%22wkid%22:102100}")
+```
+
+## Map COVID-19 essential workers in Boston
+```{r}
+# Get all ACS 2018 tables & columns names
+all_acs18_subj_tabs <- tidycensus::load_variables(2018, "acs5/subject", cache = TRUE)
+
+# Filter out just the columns we want from occupation table S2401
+occ_cols <- all_acs18_subj_tabs %>%
+  filter(str_starts(name, "S2401_C01")) %>%
+  select(name, label) %>%
+  mutate(label = str_replace(label, "Estimate!!Total!!Civilian employed population 16 years and over!?!?", "")) %>%
+  # Separate each sub-category into different columns 
+  separate(label, into=c("cat1", "cat2", "cat3"), sep="!!")
+
+# Get ACS occupation data for Boston
+suffolk_co_occ <- get_acs(geography = "tract", 
+                      table = "S2401_C01",
+                      state = "MA",
+                      county = "025",
+                      geometry=F,
+                      show_call=T,
+                      summary_var = "S2401_C01_001",
+                      cache_table =T)
+
+# Merge the Boston occupation data with the column names
+suffolk_co_occ_df <- merge(suffolk_co_occ, occ_cols, by.y="name", by.x="variable") %>%
+  select(-moe, -NAME, -summary_moe) %>%
+  # Recover total value for each tract
+  rename(total = summary_est) %>%
+  # Calculate percentage
+  ungroup() %>%
+  mutate(percent = 100 * (estimate / total)) %>%
+  arrange(GEOID)
+```
+
+```{r}
+# Define essential workers
+essential <- c("Healthcare support occupations",
+               "Healthcare practitioners and technical occupations",
+               "Protective service occupations",
+               "Food preparation and serving related occupations", 
+               "Building and grounds cleaning and maintenance occupations",
+               "Personal care and service occupations",
+               "Sales and related occupations",
+               "Office and administrative support occupations",
+               "Installation, maintenance, and repair occupations",
+               "Production occupations",
+               "Material moving occupations",
+               "Transportation occupations",
+               "Construction and extraction occupations",
+               "Farming, fishing, and forestry occupations")
+```
+
+```{r}
+# Restrict to all COVID-necessary roles
+to_plot <- suffolk_co_occ_df %>%
+  filter(grepl(paste0(essential, collapse="|"),
+               cat2) & 
+           is.na(cat3)) %>%
+  # filter(GEOID == "25025020200")
+  group_by(GEOID) %>%
+  mutate(sum_value = sum(estimate),
+         percent = sum_value / total * 100) %>%
+  select(GEOID, percent) %>%
+  unique()
+
+# Merge tract location & income data
+occ_merged <- geo_join(boston_tracts, to_plot, by_sp="GEOID10", by_df="GEOID", how="left")
+# there are some tracts with no land that we should exclude
+occ_merged <- occ_merged[occ_merged$ALAND10>0,]
+
+# Remove islands
+occ_merged <- occ_merged[!occ_merged$GEOID10=="25025980101",]
+
+# Save as shapefile
+writeOGR(obj=occ_merged, dsn="data/boston_occupations", layer="boston_occupations", driver="ESRI Shapefile")
+
+to_plot <- occ_merged
+
+colfunc <- colorRampPalette(c("#f6e9ef", "#8a4568"))
+pal_occ <- colorBin(
+  palette = colfunc(8),
+  domain = to_plot$percent,
+  bins=8
+)
+
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = to_plot, 
+              fillColor = ~pal_occ(percent), 
+              color = "black", # you need to use hex colors
+              fillOpacity = 0.8, 
+              weight = 1, 
+              smoothFactor = 0.7,
+              group="circle_marks") %>%
+  addLegend(pal = pal_occ, 
+            values = to_plot$percent, 
+            position = "bottomright", 
+            title = "Percent of <br>workers in<br>COVID-essential<br>positions",
+            labFormat = labelFormat(suffix = "%")
+            )  %>%
+  addEasyButton(easyButton(
+    icon="fa-home", title="Locate Me",
+    onClick=JS("function(btn, map){ 
+                   var groupLayer = map.layerManager.getLayerGroup('circle_marks');
+                   map.fitBounds(groupLayer.getBounds());
+               }")))
+```
+
+```{r}
+to_plot <- rgdal::readOGR(dsn="data/test_name", layer="test_name", stringsAsFactors=F)
+
+colfunc <- colorRampPalette(c("#f6e9ef", "#8a4568"))
+pal_occ <- colorBin(
+  palette = colfunc(8),
+  domain = to_plot$percent,
+  bins=8
+)
+
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = to_plot, 
+              fillColor = ~pal_occ(percent), 
+              color = "black", # you need to use hex colors
+              fillOpacity = 0.8, 
+              weight = 1, 
+              smoothFactor = 0.7,
+              group="circle_marks") %>%
+  addLegend(pal = pal_occ, 
+            values = to_plot$percent, 
+            position = "bottomright", 
+            title = "Percent of <br>workers in<br>COVID-essential<br>positions",
+            labFormat = labelFormat(suffix = "%")
+            )  %>%
+  addEasyButton(easyButton(
+    icon="fa-home", title="Locate Me",
+    onClick=JS("function(btn, map){ 
+                   var groupLayer = map.layerManager.getLayerGroup('circle_marks');
+                   map.fitBounds(groupLayer.getBounds());
+               }")))
+```
+
+
+
+## Race in Boston
+```{r}
+all_acs18_tabs <- tidycensus::load_variables(2018, "acs5", cache = TRUE)
+
+boston_race_eth <- get_acs(geography = "tract", 
+                      variables = "B03002_003", # All white, non-Hispanic/Latino
+                      state = "MA",
+                      county = "025",
+                      geometry=F,
+                      show_call=T,
+                      summary_var = "B03002_001", # All 
+                      cache_table =T)
+
+race_df <- boston_race_eth %>%
+  select(-moe, -NAME, -summary_moe) %>%
+  # Recover total value for each tract
+  rename(total = summary_est) %>%
+  # Calculate non-white 
+  mutate(nonwhite = total - estimate) %>%
+  # Calculate percentage
+  ungroup() %>%
+  mutate(percent = 100 * (nonwhite / total)) %>%
+  arrange(GEOID)
+```
+
+```{r}
+# Merge tract location & income data
+race_merged <- geo_join(boston_tracts, race_df, by_sp="GEOID10", by_df="GEOID", how="left")
+# there are some tracts with no land that we should exclude
+race_merged <- race_merged[race_merged$ALAND10>0,]
+# Remove islands
+race_merged <- race_merged[!race_merged$GEOID10=="25025980101",]
+
+# Save as shapefile
+writeOGR(obj=race_merged, dsn="data/boston_race", layer="boston_race", driver="ESRI Shapefile")
+
+to_plot <- race_merged
+
+colfunc <- colorRampPalette(c("#f6e9ef", "#8a4568"))
+pal_occ <- colorBin(
+  palette = colfunc(8),
+  domain = to_plot$percent,
+  bins=4
+)
+
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = to_plot, 
+              fillColor = ~pal_occ(percent), 
+              color = "black", # you need to use hex colors
+              fillOpacity = 0.8, 
+              weight = 1, 
+              smoothFactor = 0.7,
+              group="circle_marks") %>%
+  addLegend(pal = pal_occ, 
+            values = to_plot$percent, 
+            position = "bottomright", 
+            title = "Percent of <br>non-white<br>residents",
+            labFormat = labelFormat(suffix = "%")
+            )  %>%
+  addEasyButton(easyButton(
+    icon="fa-home", title="Locate Me",
+    onClick=JS("function(btn, map){ 
+                   var groupLayer = map.layerManager.getLayerGroup('circle_marks');
+                   map.fitBounds(groupLayer.getBounds());
+               }")))
+```
+
+# Chelsea
+## Download census tract geography
+```{r, results="hide"}
+# Download all census tract geography for Suffolk county with tigris
+tracts <- tracts(state = "MA", county = "Suffolk")
+
+# I literally listed these tract numbers by hand using
+# Suffolk County tract maps... ugh.
+chelsea_tracts <- c("25025160300", "25025160200","25025160400",
+                    "25025160101", "25025160502", "25025160601",
+                    "25025160602", "25025160501")
+chelsea_tracts <- tracts[tracts$GEOID %in% chelsea_tracts,]
+```
+
+```{r}
+# Map to verify
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = chelsea_tracts,
+              label=~GEOID)
+
+```
+
+## Map COVID-19 essential workers in Chelsea
+```{r}
+# Restrict to all COVID-necessary roles
+to_plot <- suffolk_co_occ_df %>%
+  filter(grepl(paste0(essential, collapse="|"),
+               cat2) & 
+           is.na(cat3)) %>%
+  # filter(GEOID == "25025020200")
+  group_by(GEOID) %>%
+  mutate(sum_value = sum(estimate),
+         percent = sum_value / total * 100) %>%
+  select(GEOID, percent) %>%
+  unique()
+
+# Merge tract location & income data
+occ_merged <- geo_join(chelsea_tracts, to_plot, by_sp="GEOID", by_df="GEOID", how="left")
+# there are some tracts with no land that we should exclude
+occ_merged <- occ_merged[occ_merged$ALAND>0,]
+
+# Save as shapefile
+writeOGR(obj=occ_merged, dsn="data/chelsea_occupations", layer="chelsea_occupations", driver="ESRI Shapefile")
+
+to_plot <- occ_merged
+
+pal_occ <- colorBin(
+  palette = "YlGnBu",
+  domain=c(0,100),
+  bins=8
+)
+
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = to_plot, 
+              fillColor = ~pal_occ(percent), 
+              color = "black", # you need to use hex colors
+              fillOpacity = 0.8, 
+              weight = 1, 
+              smoothFactor = 0.7,
+              group="circle_marks") %>%
+  addLegend(pal = pal_occ, 
+            values = to_plot$percent, 
+            position = "bottomright", 
+            title = "Percent of <br>workers in<br>COVID-essential<br>positions",
+            labFormat = labelFormat(suffix = "%")
+            )  %>%
+  addEasyButton(easyButton(
+    icon="fa-home", title="Locate Me",
+    onClick=JS("function(btn, map){ 
+                   var groupLayer = map.layerManager.getLayerGroup('circle_marks');
+                   map.fitBounds(groupLayer.getBounds());
+               }")))
+```
+
+
+## Map Hispanic/Latino in Chelsea
+```{r}
+suffolk_co_hisp <- get_acs(geography = "tract", 
+                      variables = "B03002_012", # Total Hispanic or Latino
+                      state = "MA",
+                      county = "025",
+                      geometry=F,
+                      show_call=T,
+                      summary_var = "B03002_001",
+                      cache_table =T)
+
+hisp_df <- suffolk_co_hisp %>%
+  select(-moe, -NAME, -summary_moe) %>%
+  # Recover total value for each tract
+  rename(total = summary_est) %>%
+  # Calculate percentage
+  ungroup() %>%
+  mutate(percent = 100 * (estimate / total)) %>%
+  arrange(GEOID)
+```
+
+```{r}
+# Merge tract location & income data
+race_merged <- geo_join(chelsea_tracts, hisp_df, by_sp="GEOID", by_df="GEOID", how="left")
+# there are some tracts with no land that we should exclude
+race_merged <- race_merged[race_merged$ALAND>0,]
+
+# Save as shapefile
+writeOGR(obj=race_merged, dsn="data/chelsea_race", layer="chelsea_race", driver="ESRI Shapefile")
+
+to_plot <- race_merged
+
+pal_occ <- colorBin(
+  palette = "YlGnBu",
+  domain = c(0,100),
+  bins = 8
+)
+
+leaflet() %>%
+  addProviderTiles(providers$Esri.WorldGrayCanvas) %>%
+  addPolygons(data = to_plot, 
+              fillColor = ~pal_occ(percent),
+              color = "black", # you need to use hex colors
+              fillOpacity = 0.8, 
+              weight = 1, 
+              smoothFactor = 0.7,
+              group="circle_marks") %>%
+  addLegend(
+    pal = pal_occ,
+            values = to_plot$percent, 
+            position = "bottomright", 
+            title = "Percent of <br>Hispanic or Latinx<br>residents",
+            labFormat = labelFormat(suffix = "%")
+            )  %>%
+  addEasyButton(easyButton(
+    icon="fa-home", title="Locate Me",
+    onClick=JS("function(btn, map){ 
+                   var groupLayer = map.layerManager.getLayerGroup('circle_marks');
+                   map.fitBounds(groupLayer.getBounds());
+               }")))
+```
+
